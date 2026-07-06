@@ -1,98 +1,262 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Sila Gateway
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+> **A multi-tenant, AI-powered ERP synchronization gateway for the Egyptian market.**  
+> Bridges WhatsApp voice notes → LLM extraction → ETA e-invoice submission, all secured with on-premise USB token signing.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+---
 
-## Description
+## Table of Contents
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Module Breakdown](#module-breakdown)
+- [Signer Bridge Client Agent](#signer-bridge-client-agent)
+- [Tech Stack](#tech-stack)
+- [Environment Variables](#environment-variables)
+- [Getting Started](#getting-started)
+- [Project Structure](#project-structure)
 
-## Project setup
+---
 
-```bash
-$ npm install
+## Overview
+
+Sila Gateway is a NestJS-based microservice that powers a multi-tenant logistics platform. It ingests unstructured driver voice notes from WhatsApp, uses an LLM to extract structured transaction data, and submits legally compliant e-invoices to Egypt's **ETA (Egyptian Tax Authority)** portal — signed with a physical USB token.
+
+```
+Driver WhatsApp Message
+        │
+        ▼
+  Ingestion Module  ──(Kafka)──▶  Intelligence Module
+  (Webhook / STT)               (GPT-4o + JSON Repair)
+                                        │
+                                        ▼
+                                  ERP Bridge Module
+                              (Serialize → Hash → Sign → Submit)
+                                        │
+                              ┌─────────┴──────────┐
+                              ▼                    ▼
+                      Signer Bridge          ETA API Portal
+                    (On-premise USB)    (api.invoicing.eta.gov.eg)
 ```
 
-## Compile and run the project
+---
 
-```bash
-# development
-$ npm run start
+## Architecture
 
-# watch mode
-$ npm run start:dev
+The system is split into two runtime environments:
 
-# production mode
-$ npm run start:prod
+### 1. Cloud Gateway (`sila-gateway`)
+A NestJS application hosted in the cloud that:
+- Receives WhatsApp webhooks and routes them per tenant via Kafka
+- Runs LLM extraction and JSON repair on raw driver messages
+- Manages the ERP outbox/ledger in MongoDB (one DB per tenant)
+- Coordinates remote signing via WebSocket with on-premise agents
+
+### 2. On-Premise Agent (`client-agents/signer-bridge`)
+A lightweight Node.js process installed at the **tenant's physical office** that:
+- Holds the USB HSM token (EgyptTrust ePass2003)
+- Connects to the cloud gateway via WebSocket
+- Signs document hashes on demand using PKCS#11 (CAdES format)
+- Never exposes the private key outside the local machine
+
+```
+┌─────────────────────────────────────────────────┐
+│                  Cloud (Sila Gateway)           │
+│                                                 │
+│  Webhook ──▶ Kafka ──▶ Intelligence ──▶ ERP     │
+│                                     Bridge ◀──┐ │
+│                                  (WebSocket)  │ │
+└───────────────────────────────────────────────┼─┘
+                                                │  WebSocket (wss://)
+┌───────────────────────────────────────────────┼─┐
+│               Tenant Office (On-Premise)      │ │
+│                                               │ │
+│  signer-bridge ──▶ pkcs11 ──▶ USB Token ──────┘ │
+│   (bridge.js)      (PKCS#11)   ePass2003        │
+└─────────────────────────────────────────────────┘
 ```
 
-## Run tests
+---
 
-```bash
-# unit tests
-$ npm run test
+## Module Breakdown
 
-# e2e tests
-$ npm run test:e2e
+| Module | Path | Responsibility |
+|---|---|---|
+| **Ingestion** | `src/modules/ingestion/` | Receives WhatsApp webhooks, validates tenant context, publishes to Kafka |
+| **Intelligence** | `src/modules/intelligence/` | Consumes Kafka events, calls GPT-4o, repairs/validates LLM JSON output, writes to ERP outbox |
+| **ERP Bridge** | `src/modules/erp-bridge/` | Consumes outbox events, serializes documents per ETA spec, requests CAdES signature, submits to ETA API |
+| **State Machine** | `src/modules/state-machine/` | Manages invoice lifecycle state transitions |
+| **Tenant** | `src/modules/tenant/` | Multi-tenant bootstrapping, MongoDB database routing |
+| **Core** | `src/core/` | Shared middleware (tenant resolution), interceptors, interfaces |
 
-# test coverage
-$ npm run test:cov
+### Data Flow — Intelligence Pipeline
+
+```
+Kafka Event (tenant.{id}.whatsapp.ingest)
+        │
+        ▼
+IntelligenceController
+        │
+        ▼
+ExtractionService.processUnstructuredText()
+  ├── OpenAI GPT-4o  →  raw JSON string
+  └── RepairService.sanitizeAndParse()
+        └── safeParseAI()  →  validates against Zod schema
+                │
+                ▼
+         TransactionIntent
+    { amount, currency, itemRef, intent }
+                │
+                ▼
+    MongoDB: tenant_{id}.erp_outbox  (status: PENDING_ERP_SYNC)
 ```
 
-## Deployment
+### Data Flow — ERP Bridge & Signing
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
-
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+```
+Kafka Event (tenant.{id}.erp.outbox)
+        │
+        ▼
+AclWorkerController
+        │
+        ▼
+EtaApiService.submitInvoice()
+  ├── serializeEtaDocument()  →  canonical string (ETA spec)
+  ├── SHA-256 hash
+  ├── SignerBridgeGateway.requestCadesSignature()
+  │     └── WebSocket emit('SIGN_HASH') ──▶ on-premise signer-bridge
+  │           └── PKCS#11 sign ──▶ base64 CAdES signature
+  └── POST /api/v1.0/documentsubmissions  →  ETA Portal
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+---
 
-## Resources
+## Signer Bridge Client Agent
 
-Check out a few resources that may come in handy when working with NestJS:
+Located in `client-agents/signer-bridge/`. This is the on-premise Node.js agent that physically controls the USB token.
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+### Prerequisites
 
-## Support
+- Windows machine with an **EgyptTrust ePass2003** USB token inserted
+- The PKCS#11 driver DLL installed (default: `C:\Windows\System32\eps2003csp11.dll`)
+- Node.js ≥ 18 + Python 3.12 + Visual Studio Build Tools (required to compile `graphene-pk11`)
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+### Setup
 
-## Stay in touch
+```bash
+cd client-agents/signer-bridge
+cp .env.example .env
+# Fill in your TENANT_ID, TOKEN_PIN, and CLOUD_WS_URL
+npm install
+node bridge.js
+```
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+### Environment Variables
 
-## License
+```env
+TENANT_ID=your-tenant-uuid
+CLOUD_WS_URL=wss://api.sila.dev
+TOKEN_PIN=123456
+DLL_PATH=C:\Windows\System32\eps2003csp11.dll
+```
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+### How It Works
+
+1. On start, `bridge.js` loads the PKCS#11 module and authenticates with the USB token PIN
+2. It connects to the cloud gateway via WebSocket and joins the room `tenant_bridge_{TENANT_ID}`
+3. When the cloud emits a `SIGN_HASH` event, the agent signs the hash using the token's private key
+4. The CAdES signature (base64) is returned to the cloud via Socket.IO acknowledgement callback
+5. On `SIGINT` (Ctrl+C), the session is logged out and the PKCS#11 module is finalized cleanly
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Runtime | Node.js v24, NestJS v11 |
+| Language | TypeScript |
+| Message Broker | Apache Kafka (`kafkajs`) |
+| Database | MongoDB (per-tenant database isolation) |
+| AI / LLM | OpenAI GPT-4o |
+| JSON Validation | `agentic-json-repair` + Zod |
+| Real-time | Socket.IO (WebSocket) |
+| Cryptography | PKCS#11 via `graphene-pk11` (on-premise only) |
+| E-Invoice Target | Egypt ETA API v1.0 |
+
+---
+
+## Environment Variables
+
+Create a `.env` file in the project root:
+
+```env
+# OpenAI
+OPENAI_API_KEY=sk-...
+
+# MongoDB
+MONGO_BASE_URI=mongodb://localhost:27017
+
+# Kafka
+KAFKA_BROKER=localhost:9092
+```
+
+---
+
+## Getting Started
+
+### Cloud Gateway
+
+```bash
+# Install dependencies
+npm install
+
+# Development (watch mode)
+npm run start:dev
+
+# Production build
+npm run build
+npm run start:prod
+
+# Lint
+npm run lint
+
+# Tests
+npm run test
+npm run test:e2e
+npm run test:cov
+```
+
+---
+
+## Project Structure
+
+```
+sila-gateway/
+├── src/
+│   ├── core/                          # Shared infrastructure
+│   │   ├── interceptors/              # Error formatting
+│   │   ├── interfaces/                # Shared TypeScript interfaces
+│   │   └── middleware/                # Tenant resolution middleware
+│   ├── modules/
+│   │   ├── ingestion/                 # WhatsApp webhook → Kafka
+│   │   │   ├── controllers/           # Webhook endpoints
+│   │   │   └── services/             # Repair + sanitize LLM output
+│   │   ├── intelligence/              # Kafka → GPT-4o → ERP outbox
+│   │   │   ├── controllers/           # Kafka consumer (regex topic pattern)
+│   │   │   └── services/             # Extraction + repair
+│   │   ├── erp-bridge/               # ERP outbox → ETA API submission
+│   │   │   ├── gateways/             # WebSocket bridge to signer agent
+│   │   │   ├── services/             # ETA serialization + API client
+│   │   │   └── workers/              # Kafka ACL worker (outbox consumer)
+│   │   ├── state-machine/            # Invoice lifecycle management
+│   │   └── tenant/                   # Tenant provisioning & DB routing
+│   ├── core.module.ts
+│   └── main.ts
+│
+└── client-agents/
+    └── signer-bridge/                 # On-premise USB token agent
+        ├── bridge.js                  # Main agent script
+        ├── .env.example
+        └── package.json
+```
