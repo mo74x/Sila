@@ -1,56 +1,36 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
+import { RepairService, TransactionIntent } from './repair.service';
 import OpenAI from 'openai';
 
 @Injectable()
 export class ExtractionService {
-  private readonly logger = new Logger(ExtractionService.name);
-  private readonly openai: OpenAI;
+  private openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-  constructor() {
-    const apiKey = process.env.OPENAI_API_KEY || 'mock-openai-api-key';
-    this.openai = new OpenAI({ apiKey });
-  }
+  constructor(private readonly repairService: RepairService) {}
 
-  async extractStructuredData(tenantId: string, text: string, context: any): Promise<any> {
-    this.logger.log(`Performing LLM extraction for tenant: ${tenantId}`);
+  async processUnstructuredText(
+    transcribedText: string,
+  ): Promise<TransactionIntent> {
+    const prompt = `
+      You are an expert financial logistics parser for the Egyptian market.
+      Extract the transaction details from the following driver voice note transcription.
+      
+      Output ONLY a raw JSON object with these exact keys: 
+      "amount" (number), "currency" (string, default "EGP"), "itemRef" (string), "intent" ("CREDIT"|"DEBIT"|"RETURN").
+      Do not include markdown formatting or conversational text.
 
-    const systemPrompt = `
-You are an expert extraction system for a multi-tenant gateway.
-Extract metadata and structured fields from the input message according to the provided context.
-Output JSON only.
-`;
+      Transcription: "${transcribedText}"
+    `;
 
-    const userPrompt = `
-Context: ${JSON.stringify(context)}
-Input text: ${text}
-`;
+    const completion = await this.openai.chat.completions.create({
+      model: 'gpt-4o', // Or whatever model you prefer
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.1,
+    });
 
-    if (!process.env.OPENAI_API_KEY) {
-      this.logger.warn('OPENAI_API_KEY is not defined. Returning simulated payload.');
-      return {
-        tenantId,
-        extracted: true,
-        summary: `Extracted data for: "${text.substring(0, Math.min(30, text.length))}..."`,
-        originalText: text,
-        timestamp: new Date().toISOString(),
-      };
-    }
+    const rawOutput = completion.choices[0].message.content || '{}';
 
-    try {
-      const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        response_format: { type: 'json_object' },
-      });
-
-      const rawJson = response.choices[0]?.message?.content || '{}';
-      return JSON.parse(rawJson);
-    } catch (err: any) {
-      this.logger.error(`Error during LLM extraction for tenant ${tenantId}`, err);
-      throw err;
-    }
+    // Pass to your repair utility to guarantee safe ERP insertion
+    return this.repairService.sanitizeAndParse(rawOutput);
   }
 }

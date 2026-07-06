@@ -1,34 +1,27 @@
 import { NestFactory } from '@nestjs/core';
-import { Transport, MicroserviceOptions } from '@nestjs/microservices';
-import { AppModule } from './core.module';
-import { LoggingInterceptor } from './core/interceptors/logging.interceptor';
-import { ErrorFormatInterceptor } from './core/interceptors/error-format.interceptor';
+import { CoreModule } from './core.module';
+import { MicroserviceOptions, Transport } from '@nestjs/microservices';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(CoreModule);
 
-  app.useGlobalInterceptors(
-    new LoggingInterceptor(),
-    new ErrorFormatInterceptor(),
-  );
-
-  const kafkaBroker = process.env.KAFKA_BROKER ?? 'localhost:9092';
+  // Connect the Kafka Microservice consumer
   app.connectMicroservice<MicroserviceOptions>({
     transport: Transport.KAFKA,
     options: {
       client: {
-        brokers: [kafkaBroker],
+        brokers: [process.env.KAFKA_BROKER || 'localhost:9092'],
+        clientId: 'sila-intelligence-worker',
       },
       consumer: {
-        groupId: 'sila-gateway-consumer',
+        groupId: 'sila-whatsapp-consumers',
       },
     },
   });
 
+  // Start both HTTP and Kafka listeners
   await app.startAllMicroservices();
-
-  const port = process.env.PORT ?? 3000;
-  await app.listen(port);
-  console.log(`Application is running on: http://localhost:${port}`);
+  await app.listen(process.env.PORT || 3000);
+  console.log(`Sila Gateway running on port ${process.env.PORT || 3000}`);
 }
-bootstrap();
+void bootstrap();

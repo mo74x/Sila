@@ -2,21 +2,37 @@ import { Injectable, Logger } from '@nestjs/common';
 import { safeParseAI } from 'agentic-json-repair';
 import { z } from 'zod';
 
+export interface TransactionIntent {
+  amount: number | null;
+  currency: string;
+  itemRef: string | null;
+  intent: 'CREDIT' | 'DEBIT' | 'RETURN' | 'UNKNOWN';
+}
+
+const TransactionIntentSchema = z.object({
+  amount: z.number().nullable(),
+  currency: z.string(),
+  itemRef: z.string().nullable(),
+  intent: z.enum(['CREDIT', 'DEBIT', 'RETURN', 'UNKNOWN']),
+});
+
 @Injectable()
 export class RepairService {
   private readonly logger = new Logger(RepairService.name);
 
-  repairJson(corruptedJson: string, schema?: z.ZodType<any>): any {
-    this.logger.log('Repairing JSON string using agentic-json-repair');
-    
-    const targetSchema = schema || z.record(z.any());
-    const result = safeParseAI(corruptedJson, targetSchema);
+  sanitizeAndParse(rawLlmOutput: string): TransactionIntent {
+    // safeParseAI repairs malformed JSON and validates against the Zod schema
+    const result = safeParseAI(rawLlmOutput, TransactionIntentSchema);
 
-    if (result.success) {
-      return result.data;
-    } else {
-      this.logger.error(`JSON repair/validation failed. Error: ${result.error}`);
-      throw new Error(`JSON repair failed: ${result.error}`);
+    if (!result.success) {
+      this.logger.error(
+        'CRITICAL: agentic-json-repair failed to recover payload',
+        result.error,
+      );
+      throw new Error('LLM_OUTPUT_UNRECOVERABLE');
     }
+
+    this.logger.log('Successfully repaired and parsed LLM payload.');
+    return result.data;
   }
 }
