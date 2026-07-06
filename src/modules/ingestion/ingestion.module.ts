@@ -1,11 +1,29 @@
 import { Module } from '@nestjs/common';
-import { IngestionController } from './controllers/ingestion.controller';
+import { ClientsModule, Transport } from '@nestjs/microservices';
+import { WebhookController } from './controllers/webhook.controller';
 import { IngestionService } from './services/ingestion.service';
-import { KafkaModule } from '../../core/kafka/kafka.module';
+import { TenantKafkaProducer } from '../../core/kafka/tenant-kafka.producer';
 
 @Module({
-  imports: [KafkaModule],
-  controllers: [IngestionController],
-  providers: [IngestionService],
+  imports: [
+    // Register the Kafka Client
+    ClientsModule.register([
+      {
+        name: 'KAFKA_CLIENT',
+        transport: Transport.KAFKA,
+        options: {
+          client: {
+            clientId: 'sila-gateway',
+            brokers: [process.env.KAFKA_BROKER || 'localhost:9092'],
+          },
+          producer: {
+            allowAutoTopicCreation: true,
+          },
+        },
+      },
+    ]),
+  ],
+  controllers: [WebhookController],
+  providers: [IngestionService, TenantKafkaProducer],
 })
 export class IngestionModule {}
